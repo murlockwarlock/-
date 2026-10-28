@@ -12,7 +12,7 @@ SCRIPT = Path(__file__).with_name("найти.py")
 
 
 class EvidenceTests(unittest.TestCase):
-    def run_shift(self, plc, station, boxes, laser=""):
+    def run_shift(self, plc, station, boxes, laser="", strict=False):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
             (folder / "plc.csv").write_text(
@@ -25,11 +25,16 @@ class EvidenceTests(unittest.TestCase):
             )
             (folder / "laser.log").write_text(laser, encoding="utf-8")
             result = subprocess.run(
-                [sys.executable, str(SCRIPT), directory],
+                [sys.executable, str(SCRIPT), directory] + (["--strict"] if strict else ["--compat"]),
                 capture_output=True, text=True, timeout=10,
             )
+            rows = list(csv.DictReader(io.StringIO(result.stdout), delimiter=";"))
+            if strict:
+                import json
+                self.assertIn(result.returncode, (0, 10, 20), result.stderr)
+                return rows, json.loads(result.stderr), result.returncode
             self.assertEqual(result.returncode, 0, result.stderr)
-            return list(csv.DictReader(io.StringIO(result.stdout), delimiter=";"))
+            return rows
 
     def test_sparse_pushes_do_not_invent_rejection_of_middle_tube(self):
         rows = self.run_shift(
@@ -185,7 +190,7 @@ class EvidenceTests(unittest.TestCase):
                     "2026-10-21 21:00:00.000;100;10;1;90;1;18\n"
                     f"2026-10-21 21:00:01.000;{counters};1;18\n", encoding="utf-8",
                 )
-                result = subprocess.run([sys.executable, str(SCRIPT), directory],
+                result = subprocess.run([sys.executable, str(SCRIPT), directory, "--compat"],
                                         capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, "")

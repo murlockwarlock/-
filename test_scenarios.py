@@ -4,7 +4,7 @@ import unittest
 import test_detector
 
 
-def synthetic_shift(speed, box_size, changing, defect):
+def synthetic_shift(speed, box_size, changing, defect, spacing=0.38):
     velocity = speed / 60
     faster = velocity * 1.25
     change_at = 0.9 / velocity
@@ -39,7 +39,7 @@ def synthetic_shift(speed, box_size, changing, defect):
     failed = 2 if defect == "failed" else None
     expected_box = None
     for number in range(1, count + 1):
-        position = 0.6 + (number - 1) * 0.38
+        position = 0.6 + (number - 1) * spacing
         code = f"CODE{number}"
         marked = reach(position)
         inputs.append((reach(position + 0.4), number))

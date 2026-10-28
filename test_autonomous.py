@@ -104,7 +104,7 @@ class AutonomousScenarios(unittest.TestCase):
         self.assertTrue(any(i["code"] == "CLOCK_CORRECTION_INTERVAL" for i in report["issues"]))
 
     def test_malformed_input_has_machine_error_without_csv(self):
-        for fault in ["counter_reset", "nan_speed", "box_count", "missing_laser", "invalid_utf8", "truncated_csv", "truncated_log"]:
+        for fault in ["counter_reset", "nan_speed", "box_count", "missing_laser", "invalid_utf8", "truncated_csv", "truncated_log", "duplicate_box_code"]:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 folder = Path(directory)
                 plc, station, boxes, laser, _ = test_scenarios.synthetic_shift(18, 3, False, None)
@@ -116,6 +116,8 @@ class AutonomousScenarios(unittest.TestCase):
                     plc += "2026-01-02 22:00:00.000;9\n"
                 if fault == "truncated_log":
                     laser += "2026-01-02 22:\n"
+                if fault == "duplicate_box_code":
+                    boxes = boxes.replace(";авто;3;CODE1 CODE2 CODE3", ";авто;4;CODE1 CODE1 CODE2 CODE3", 1)
                 if fault == "box_count":
                     boxes = boxes.replace(";авто;3;", ";авто;99;", 1)
                 for name, text in [("plc.csv", "время;n_in;n_push;push_no;n_out;лента;скорость\n" + plc),
@@ -182,6 +184,29 @@ class AutonomousScenarios(unittest.TestCase):
         self.assertEqual(code, 20)
         self.assertEqual(report["status"], "INCOMPLETE")
         self.assertTrue(any(i["code"] == "UNASSIGNED_OUTPUTS" for i in report["issues"]))
+
+    def test_repeated_camera_code_without_prints_is_not_silent(self):
+        plc, station, boxes, _, _ = test_scenarios.synthetic_shift(18, 1, False, None)
+        station = station.replace("CODE2", "CODE1")
+        boxes = boxes.replace("CODE2", "CODE1")
+        rows, report, code = test_detector.EvidenceTests().run_shift(plc, station, boxes, "", strict=True)
+        self.assertEqual(code, 20)
+        self.assertTrue(any(i["code"] == "REPEATED_CAMERA_CODE" for i in report["issues"]))
+        self.assertTrue(any(r["вид"] == "Г" for r in rows))
+
+    def test_station_tail_outside_plc_is_incomplete(self):
+        plc, station, boxes, laser, _ = test_scenarios.synthetic_shift(18, 3, False, None)
+        station += "2026-01-02 21:01:00.000 №10 брак NoRead\n"
+        rows, report, code = test_detector.EvidenceTests().run_shift(plc, station, boxes, laser, strict=True)
+        self.assertEqual(code, 20)
+        self.assertTrue(any(i["code"] == "STATION_OUTSIDE_PLC" for i in report["issues"]))
+
+    def test_print_tail_outside_plc_is_incomplete(self):
+        plc, station, boxes, laser, _ = test_scenarios.synthetic_shift(18, 3, False, None)
+        laser += "2026-01-02 21:01:00.000 → SendContent EXTRA\n2026-01-02 21:01:00.300 ← MarkEnd\n"
+        rows, report, code = test_detector.EvidenceTests().run_shift(plc, station, boxes, laser, strict=True)
+        self.assertEqual(code, 20)
+        self.assertTrue(any(i["code"] == "PRINT_OUTSIDE_PLC" for i in report["issues"]))
 
     def test_manual_box_record_does_not_prove_physical_contents(self):
         rows, report, code = test_detector.EvidenceTests().run_shift(

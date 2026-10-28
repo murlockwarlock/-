@@ -277,7 +277,8 @@ def read_boxes(folder: Path, label_times: dict[str, datetime]):
                 raise ValueError("неполная или лишняя колонка boxes.csv")
             if (not row["sscc"] or row["sscc"] in seen
                     or row["вид"] not in {"авто", "ручной", "неполный"}
-                    or int(row["кодов"]) != len(row["коды"].split())):
+                    or int(row["кодов"]) != len(row["коды"].split())
+                    or len(set(row["коды"].split())) != len(row["коды"].split())):
                 raise ValueError(f"некорректный короб в строке {line_number}")
             seen.add(row["sscc"])
             raw = parse_time(row["этикетка"])
@@ -649,6 +650,15 @@ def autonomous_result(folder, tubes, plc_rows, numbered, boxes, labels, marks, s
 
     if not plc_rows:
         issue("NO_PLC_BASELINE", "plc.csv", "Нет исходного состояния ПЛК")
+    if plc_rows:
+        first, last = plc_rows[0], plc_rows[-1]
+        for event in numbered:
+            if event.mono >= first["mono"] and (event.mono > last["mono"] or event.number > last["n_in"]):
+                issue("STATION_OUTSIDE_PLC", event.number, "Наблюдение станции не покрыто счётчиками или временем ПЛК")
+        for _raw, mono, code in marks:
+            arrival = motion.arrival(mono - timedelta(seconds=0.3), 0.4)
+            if mono >= first["mono"] and (arrival is None or arrival > last["mono"]):
+                issue("PRINT_OUTSIDE_PLC", code, "Нанесение не покрыто наблюдаемым интервалом входов ПЛК")
     epochs = {}
     for name in ("station.log", "laser.log", "plc.csv"):
         clock = MonotonicClock()
@@ -749,6 +759,14 @@ def autonomous_result(folder, tubes, plc_rows, numbered, boxes, labels, marks, s
                 issue("BOX_BOUNDARY_UNCERTAIN", number, "S2 пересекает границу этикетки или короб неполный")
         elif number not in absent:
             issue("PASSAGE_UNCERTAIN", number, "Недостаточно данных для прохода или отсутствия S2")
+
+    observed_codes = defaultdict(list)
+    for number, code in actual_code.items():
+        if code != "NoRead":
+            observed_codes[code].append(number)
+    for code, numbers in observed_codes.items():
+        if len(numbers) > 1 and len(proven_prints[code]) < len(numbers):
+            issue("REPEATED_CAMERA_CODE", code, "Код наблюдался у разных физических туб без полного подтверждения нанесений")
 
     for code, numbers in proven_prints.items():
         if len(numbers) > 1:

@@ -12,7 +12,7 @@ SCRIPT = Path(__file__).with_name("найти.py")
 
 
 class EvidenceTests(unittest.TestCase):
-    def run_shift(self, plc, station, boxes):
+    def run_shift(self, plc, station, boxes, laser=""):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
             (folder / "plc.csv").write_text(
@@ -23,7 +23,7 @@ class EvidenceTests(unittest.TestCase):
             (folder / "boxes.csv").write_text(
                 "sscc;этикетка;вид;кодов;коды\n" + boxes, encoding="utf-8"
             )
-            (folder / "laser.log").write_text("", encoding="utf-8")
+            (folder / "laser.log").write_text(laser, encoding="utf-8")
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), directory],
                 capture_output=True, text=True, timeout=10,
@@ -121,6 +121,75 @@ class EvidenceTests(unittest.TestCase):
             "123;2026-10-21 23:30:03.600;авто;1;CODE\n",
         )
         self.assertEqual([(r["вид"], r["туба"]) for r in rows], [("Б", "2")])
+
+    def test_unread_tube_does_not_inherit_next_tube_print(self):
+        rows = self.run_shift(
+            "2026-10-21 21:00:00.000;0;0;0;0;1;18\n"
+            "2026-10-21 21:00:01.990;0;0;0;0;1;18\n"
+            "2026-10-21 21:00:02.010;1;0;0;0;1;18\n"
+            "2026-10-21 21:00:02.990;1;0;0;0;1;18\n"
+            "2026-10-21 21:00:03.010;2;0;0;0;1;18\n"
+            "2026-10-21 21:00:04.320;2;1;1;0;1;18\n"
+            "2026-10-21 21:00:04.350;2;1;1;1;1;18\n"
+            "2026-10-21 21:00:05.350;2;1;1;2;1;18\n",
+            "2026-10-21 21:00:02.100 №1 брак NoRead\n"
+            "2026-10-21 21:00:03.100 №2 годен NEXT\n"
+            "2026-10-21 21:00:05.640 Этикетка 123, дата 21.10.2026\n",
+            "123;2026-10-21 21:00:05.640;авто;1;NEXT\n",
+            "2026-10-21 21:00:00.100 → SendContent FIRST\n"
+            "2026-10-21 21:00:00.967 ← MarkEnd\n"
+            "2026-10-21 21:00:01.000 → SendContent NEXT\n"
+            "2026-10-21 21:00:01.967 ← MarkEnd\n",
+        )
+        self.assertEqual([(r["вид"], r["туба"], r["код"]) for r in rows],
+                         [("Б", "1", "FIRST")])
+
+    def test_failed_push_of_recorded_tube_is_not_a_missing_tube(self):
+        rows = self.run_shift(
+            "2026-10-21 21:00:00.000;0;0;0;0;1;18\n"
+            "2026-10-21 21:00:01.990;0;0;0;0;1;18\n"
+            "2026-10-21 21:00:02.010;1;0;0;0;1;18\n"
+            "2026-10-21 21:00:04.010;1;1;1;0;1;18\n"
+            "2026-10-21 21:00:04.320;1;1;1;0;1;18\n"
+            "2026-10-21 21:00:04.350;1;1;1;1;1;18\n",
+            "2026-10-21 21:00:02.100 №1 годен CODE\n"
+            "2026-10-21 21:00:02.200 №1 брак NoRead\n"
+            "2026-10-21 21:00:04.640 Этикетка 123, дата 21.10.2026\n",
+            "123;2026-10-21 21:00:04.640;авто;1;CODE\n",
+        )
+        self.assertEqual(rows, [])
+
+    def test_initial_counters_are_a_baseline_not_shift_events(self):
+        for failed, final_out in [(False, 91), (True, 92)]:
+            with self.subTest(failed=failed):
+                rows = self.run_shift(
+                    "2026-10-21 21:00:00.000;100;10;99;90;1;18\n"
+                    "2026-10-21 21:00:02.000;101;10;99;90;1;18\n"
+                    "2026-10-21 21:00:04.000;102;11;101;90;1;18\n"
+                    f"2026-10-21 21:00:07.000;102;11;101;{final_out};1;18\n",
+                    "2026-10-21 21:00:02.100 №101 брак NoRead\n"
+                    "2026-10-21 21:00:04.100 №102 годен CODE\n"
+                    "2026-10-21 21:00:07.100 Этикетка 123, дата 21.10.2026\n",
+                    "123;2026-10-21 21:00:07.100;авто;1;CODE\n",
+                )
+                self.assertEqual([(r["вид"], r["туба"]) for r in rows],
+                                 [("Б", "101")] if failed else [])
+
+    def test_plc_counter_reset_fails_without_partial_csv(self):
+        for counters in ["99;10;1;90", "100;9;1;90", "100;10;1;89"]:
+            with self.subTest(counters=counters), tempfile.TemporaryDirectory() as directory:
+                folder = Path(directory)
+                (folder / "station.log").write_text("", encoding="utf-8")
+                (folder / "plc.csv").write_text(
+                    "время;n_in;n_push;push_no;n_out;лента;скорость\n"
+                    "2026-10-21 21:00:00.000;100;10;1;90;1;18\n"
+                    f"2026-10-21 21:00:01.000;{counters};1;18\n", encoding="utf-8",
+                )
+                result = subprocess.run([sys.executable, str(SCRIPT), directory],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("сброс счётчиков ПЛК", result.stderr)
 
 
 if __name__ == "__main__":

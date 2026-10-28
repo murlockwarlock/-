@@ -48,6 +48,8 @@ class Tube:
     number: int
     s1_raw: datetime | None = None
     s1_mono: datetime | None = None
+    s1_lower: datetime | None = None
+    s1_upper: datetime | None = None
     input_group: int = -1
     speed: float = 0.0
     duplicate_input: bool = False
@@ -112,16 +114,11 @@ def read_plc(folder: Path):
     if not rows:
         return tubes, rows, samples, out_changes
 
-    previous = {
-        "raw": rows[0]["raw"],
-        "mono": rows[0]["mono"],
-        "n_in": 0,
-        "n_push": 0,
-        "n_out": 0,
-        "push_no": 0,
-    }
+    previous = rows[0]
     group = 0
-    for row in rows:
+    for row in rows[1:]:
+        if any(row[key] < previous[key] for key in ("n_in", "n_push", "n_out")):
+            raise ValueError("сброс счётчиков ПЛК внутри смены не поддерживается")
         added = row["n_in"] - previous["n_in"]
         if added > 0:
             group += 1
@@ -145,6 +142,8 @@ def read_plc(folder: Path):
                         if added == 1
                         else previous["mono"] + mono_span * fraction
                     ),
+                    s1_lower=previous["mono"],
+                    s1_upper=row["mono"],
                     input_group=group,
                     speed=row["speed"],
                     duplicate_input=(
@@ -270,13 +269,111 @@ def read_laser(folder: Path):
             if match:
                 current_code = match.group(1)
                 sends[current_code].append((raw, mono))
-            elif message.endswith("MarkEnd") and current_code:
-                completed.append((raw, mono, current_code))
+            elif message.endswith("MarkEnd"):
+                completed.append((raw, mono, current_code or ""))
+                current_code = None
             else:
                 match = re.search(r"MarkCount (\d+)", message)
                 if match:
                     mark_counts.append((mono, int(match.group(1))))
     return sends, completed, mark_counts
+
+
+class BeltMotion:
+    def __init__(self, folder: Path, plc_rows: list[dict]) -> None:
+        self.changes: dict[datetime, float | None] = {}
+        if not plc_rows:
+            self.times = []
+            return
+        first = plc_rows[0]
+        speed = first["speed"]
+        running = bool(first["belt"])
+        self.changes[first["mono"]] = speed / 60 if running else 0.0
+        clock = MonotonicClock()
+        previous = None
+        with (folder / "station.log").open(encoding="utf-8-sig") as stream:
+            for line in stream:
+                if len(line) < 24:
+                    continue
+                raw = parse_time(line[:23])
+                offset = clock.offset
+                mono = clock.convert(raw)
+                if clock.offset != offset and previous is not None:
+                    self.changes[previous] = None
+                    self.changes[mono] = speed / 60 if running else 0.0
+                previous = mono
+                message = line[24:].strip()
+                match = re.match(r"(?:Пуск ленты, |Скорость ленты: )([\d.,]+) м/мин", message)
+                if match:
+                    speed = float(match[1].replace(",", "."))
+                    if message.startswith("Пуск"):
+                        running = True
+                    self.changes[mono] = speed / 60 if running else 0.0
+                elif message == "Стоп ленты":
+                    running = False
+                    self.changes[mono] = 0.0
+        self.times = sorted(self.changes)
+
+    def arrival(self, start: datetime, distance: float) -> datetime | None:
+        index = bisect.bisect_right(self.times, start) - 1
+        if index < 0:
+            return None
+        current = start
+        while index < len(self.times):
+            speed = self.changes[self.times[index]]
+            if speed is None:
+                return None
+            end = self.times[index + 1] if index + 1 < len(self.times) else None
+            if speed > 0:
+                duration = distance / speed
+                if end is None or duration <= (end - current).total_seconds():
+                    return current + timedelta(seconds=duration)
+                distance -= (end - current).total_seconds() * speed
+            if end is None:
+                return None
+            current = end
+            index += 1
+        return None
+
+
+def passage_evidence(tubes: dict[int, Tube], plc_rows: list[dict], motion: BeltMotion):
+    windows = []
+    for number, tube in tubes.items():
+        if tube.s1_lower is None or tube.s1_upper is None:
+            continue
+        low = motion.arrival(tube.s1_lower, 0.7)
+        high = motion.arrival(tube.s1_upper, 0.7)
+        if low is not None and high is not None:
+            windows.append((low, high, number))
+    windows.sort()
+    starts = [window[0] for window in windows]
+    widest = max((high - low for low, high, _ in windows), default=timedelta())
+    passed = set()
+    for before, after in zip(plc_rows, plc_rows[1:]):
+        if after["n_out"] - before["n_out"] != 1:
+            continue
+        left = bisect.bisect_left(starts, before["mono"] - widest)
+        right = bisect.bisect_right(starts, after["mono"])
+        candidates = [number for low, high, number in windows[left:right]
+                      if high > before["mono"] and low < after["mono"]]
+        if len(candidates) == 1:
+            passed.add(candidates[0])
+    return passed
+
+
+def printed_code(tube: Tube, completed_marks, motion: BeltMotion) -> str:
+    if tube.s1_lower is None or tube.s1_upper is None:
+        return "NoRead"
+    candidates = []
+    for raw, mono, code in completed_marks:
+        if mono > tube.s1_upper + timedelta(seconds=0.3):
+            break
+        if tube.s1_raw is None or mono - raw != tube.s1_mono - tube.s1_raw:
+            continue
+        arrival = motion.arrival(mono - timedelta(seconds=0.3), 0.4)
+        if arrival is not None and tube.s1_lower < arrival <= tube.s1_upper:
+            candidates.append(code)
+    return candidates[0] if len(candidates) == 1 and candidates[0] else "NoRead"
 
 
 def main() -> int:
@@ -290,6 +387,8 @@ def main() -> int:
         numbered, repeats, labels, stops, starts, requeues = read_station(folder)
         boxes = read_boxes(folder, labels)
         sends, completed_marks, mark_counts = read_laser(folder)
+        motion = BeltMotion(folder, plc_rows)
+        passed_numbers = passage_evidence(tubes, plc_rows, motion)
     except (OSError, ValueError, KeyError) as error:
         print(f"Ошибка входных данных: {error}", file=sys.stderr)
         return 1
@@ -335,7 +434,7 @@ def main() -> int:
     # А: код успел попасть в запись, но последний/опоздавший вердикт привёл к толчку.
     for number in sorted(events_by_number):
         tube = tubes.get(number)
-        if not tube or not tube.pushed or tube.s1_raw is None or tube.s1_mono is None:
+        if not tube or not tube.pushed or number in passed_numbers or tube.s1_raw is None or tube.s1_mono is None:
             continue
         events = events_by_number[number]
         good = next(
@@ -369,6 +468,7 @@ def main() -> int:
         following = tubes.get(number + 1)
         if (
             not tube.pushed
+            or number in passed_numbers
             or tube.s1_raw is None
             or tube.s1_mono is None
             or following is None
@@ -406,6 +506,10 @@ def main() -> int:
     # В: повторная выдача кода после потери MarkEnd считается настоящим дублем
     # только если MarkCount доказывает неувиденное станцией нанесение.
     mark_count_times = [item[0] for item in mark_counts]
+    send_events = sorted((mono, raw, code) for code, values in sends.items() for raw, mono in values)
+    send_times = [event[0] for event in send_events]
+    completed_times = [event[1] for event in completed_marks]
+    used_duplicates = set()
     for _raw, requeue_mono, code, _line in requeues:
         sent = sends.get(code, [])
         before_sends = [item for item in sent if item[1] < requeue_mono]
@@ -423,7 +527,19 @@ def main() -> int:
         observed = sum(
             count_before[0] < item[1] <= count_after[0] for item in completed_marks
         )
-        if count_after[1] - count_before[1] <= observed:
+        if count_after[1] - count_before[1] - observed != 1:
+            continue
+        pending = []
+        begin = max(0, bisect.bisect_right(send_times, count_before[0]) - 1)
+        end = bisect.bisect_right(send_times, count_after[0])
+        for index in range(begin, end):
+            sent_at, _sent_raw, sent_code = send_events[index]
+            next_send = send_times[index + 1] if index + 1 < len(send_times) else count_after[0]
+            limit = min(next_send, count_after[0])
+            completion = bisect.bisect_right(completed_times, max(sent_at, count_before[0]))
+            if completion >= len(completed_marks) or completed_times[completion] > limit:
+                pending.append((sent_at, sent_code))
+        if pending != [(first_send[1], code)]:
             continue
 
         # Привязываем потерянное нанесение к номеру через последний код, для
@@ -443,7 +559,23 @@ def main() -> int:
         completed_between = sum(
             mark[1] < item[1] < first_send[1] for item in completed_marks
         )
+        chain = [mark] + [item for item in completed_marks if mark[1] < item[1] < first_send[1]]
+        uninterrupted = True
+        for completed in chain:
+            index = bisect.bisect_right(send_times, completed[1])
+            earliest_next_tube = motion.arrival(completed[1] - timedelta(seconds=0.3), 0.25)
+            if (index >= len(send_times) or earliest_next_tube is None
+                    or send_times[index] >= earliest_next_tube):
+                uninterrupted = False
+                break
+        if not uninterrupted:
+            continue
         first_number = base_event.number + completed_between + 1
+        if first_number >= second_event.number:
+            continue
+        identity = (code, first_number, second_event.number)
+        if identity in used_duplicates:
+            continue
         first_tube = tubes.get(first_number)
         second_tube = tubes.get(second_event.number)
         target_box = next((b for b in code_boxes.get(code, []) if b.kind != "ручной"), None)
@@ -454,8 +586,10 @@ def main() -> int:
             or first_tube.s1_mono is None
             or second_tube.s1_raw is None
             or target_box is None
+            or printed_code(second_tube, completed_marks, motion) != code
         ):
             continue
+        used_duplicates.add(identity)
         add_row(
             "В",
             f"{show_time(first_tube.s1_raw)} {show_time(second_tube.s1_raw)}",
@@ -491,7 +625,8 @@ def main() -> int:
         missing += missing_by_box[box.sscc]
         expected = cumulative - missing + extra
         index = bisect.bisect_right(sample_times, box.mono) - 1
-        lower = plc_samples[index][1] if index >= 0 else 0
+        baseline = plc_rows[0]["n_out"] if plc_rows else 0
+        lower = plc_samples[index][1] - baseline if index >= 0 else 0
         surplus = lower - expected
         if surplus > 0:
             candidates = [
@@ -501,12 +636,16 @@ def main() -> int:
                 and (previous_label is None or e.mono > previous_label)
                 and e.mono < box.mono
             ]
-            for event in candidates[-surplus:]:
-                prior_marks = [item for item in completed_marks if item[1] <= event.mono]
-                code = prior_marks[-1][2] if prior_marks else "NoRead"
+            candidates = list({event.number: event for event in candidates}.values())
+            if len(candidates) > surplus:
+                candidates = [event for event in candidates if event.number in passed_numbers]
+            if len(candidates) > surplus:
+                candidates = []
+            for event in candidates:
                 tube = tubes.get(event.number)
                 if tube is None or tube.s1_raw is None or tube.s1_mono is None:
                     continue
+                code = printed_code(tube, completed_marks, motion)
                 add_row(
                     "Б",
                     show_time(tube.s1_raw),

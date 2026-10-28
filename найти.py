@@ -361,7 +361,7 @@ def passage_evidence(tubes: dict[int, Tube], plc_rows: list[dict], motion: BeltM
     return passed
 
 
-def printed_code(tube: Tube, completed_marks, motion: BeltMotion) -> str:
+def printed_code(tube: Tube, completed_marks, motion: BeltMotion, tubes: dict[int, Tube]) -> str:
     if tube.s1_lower is None or tube.s1_upper is None:
         return "NoRead"
     candidates = []
@@ -372,6 +372,11 @@ def printed_code(tube: Tube, completed_marks, motion: BeltMotion) -> str:
             continue
         arrival = motion.arrival(mono - timedelta(seconds=0.3), 0.4)
         if arrival is not None and tube.s1_lower < arrival <= tube.s1_upper:
+            owners = [other.number for other in tubes.values()
+                      if other.s1_lower is not None and other.s1_upper is not None
+                      and other.s1_lower < arrival <= other.s1_upper]
+            if owners != [tube.number]:
+                return "NoRead"
             candidates.append(code)
     return candidates[0] if len(candidates) == 1 and candidates[0] else "NoRead"
 
@@ -536,7 +541,7 @@ def main() -> int:
             sent_at, _sent_raw, sent_code = send_events[index]
             next_send = send_times[index + 1] if index + 1 < len(send_times) else count_after[0]
             limit = min(next_send, count_after[0])
-            completion = bisect.bisect_right(completed_times, max(sent_at, count_before[0]))
+            completion = bisect.bisect_right(completed_times, sent_at)
             if completion >= len(completed_marks) or completed_times[completion] > limit:
                 pending.append((sent_at, sent_code))
         if pending != [(first_send[1], code)]:
@@ -586,7 +591,7 @@ def main() -> int:
             or first_tube.s1_mono is None
             or second_tube.s1_raw is None
             or target_box is None
-            or printed_code(second_tube, completed_marks, motion) != code
+            or printed_code(second_tube, completed_marks, motion, tubes) != code
         ):
             continue
         used_duplicates.add(identity)
@@ -645,7 +650,7 @@ def main() -> int:
                 tube = tubes.get(event.number)
                 if tube is None or tube.s1_raw is None or tube.s1_mono is None:
                     continue
-                code = printed_code(tube, completed_marks, motion)
+                code = printed_code(tube, completed_marks, motion, tubes)
                 add_row(
                     "Б",
                     show_time(tube.s1_raw),

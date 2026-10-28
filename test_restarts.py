@@ -94,6 +94,14 @@ class RestartScenarios(unittest.TestCase):
         self.assertEqual([(r["вид"], r["туба"], r["код"]) for r in rows],
                          [("В", "2 5", "RETRY")])
 
+    def test_counter_baseline_after_acknowledgment_keeps_real_duplicate(self):
+        plc, station, boxes, laser = restart_shift("lost_ack")
+        laser = "\n".join(sorted(laser.splitlines() + [
+            "2026-02-03 21:00:01.305 ← MarkCount 101",
+        ])) + "\n"
+        rows = test_detector.EvidenceTests().run_shift(plc, station, boxes, laser)
+        self.assertEqual([(r["вид"], r["туба"]) for r in rows], [("В", "2 5")])
+
     def test_no_duplicate_claim_without_code_specific_evidence(self):
         for mode in ["unprinted", "unrelated", "no_resend", "reset", "empty_buffer", "missing_counter"]:
             with self.subTest(mode=mode):

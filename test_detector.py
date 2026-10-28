@@ -191,6 +191,22 @@ class EvidenceTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertIn("сброс счётчиков ПЛК", result.stderr)
 
+    def test_shared_poll_interval_does_not_assign_neighbors_print(self):
+        rows = self.run_shift(
+            "2026-10-21 21:00:00.000;0;0;0;0;1;18\n"
+            "2026-10-21 21:00:02.000;0;0;0;0;1;18\n"
+            "2026-10-21 21:00:03.700;2;0;0;0;1;18\n"
+            "2026-10-21 21:00:06.000;2;1;1;2;1;18\n",
+            "2026-10-21 21:00:02.430 №1 брак NoRead\n"
+            "2026-10-21 21:00:03.730 №2 годен GOOD\n"
+            "2026-10-21 21:00:06.267 Этикетка 123, дата 21.10.2026\n",
+            "123;2026-10-21 21:00:06.267;авто;1;GOOD\n",
+            "2026-10-21 21:00:02.200 → SendContent GOOD\n"
+            "2026-10-21 21:00:02.600 ← MarkEnd\n",
+        )
+        self.assertEqual([(r["вид"], r["туба"], r["код"]) for r in rows],
+                         [("Б", "1", "NoRead")])
+
 
 if __name__ == "__main__":
     unittest.main()

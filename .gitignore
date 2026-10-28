@@ -1,0 +1,47 @@
+# Исходные данные задания и производственные журналы
+data/
+input/
+outputs/
+work/
+*.log
+*.csv
+*.mp3
+*.wav
+
+# Архивы и экспорт диалогов
+*.zip
+*.rar
+*.7z
+*.jsonl
+*.pdf
+
+# Условие, отчёт и готовый ответ конкретной смены
+ЗАДАНИЕ.md
+ЛИНИЯ.md
+ОТЧЁТ.md
+ответ.csv
+
+# Секреты и локальная конфигурация
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+.coverage
+htmlcov/
+
+# IDE и ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

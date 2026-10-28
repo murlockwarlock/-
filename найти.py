@@ -30,7 +30,7 @@ def show_time(value: datetime) -> str:
 
 
 class MonotonicClock:
-    """Сохраняет порядок строк, даже если часы станции перевели назад."""
+    """Общий ключ порядка эпох; разность ключей через перевод не есть длительность."""
 
     def __init__(self) -> None:
         self.previous: datetime | None = None
@@ -38,7 +38,7 @@ class MonotonicClock:
 
     def convert(self, raw: datetime) -> datetime:
         if self.previous is not None and raw < self.previous - timedelta(seconds=5):
-            self.offset += self.previous - raw + timedelta(milliseconds=1)
+            self.offset += timedelta(days=1)
         self.previous = raw
         return raw + self.offset
 
@@ -50,6 +50,7 @@ class Tube:
     s1_mono: datetime | None = None
     input_group: int = -1
     speed: float = 0.0
+    duplicate_input: bool = False
     pushed: bool = False
     push_raw: datetime | None = None
     push_mono: datetime | None = None
@@ -146,6 +147,12 @@ def read_plc(folder: Path):
                     ),
                     input_group=group,
                     speed=row["speed"],
+                    duplicate_input=(
+                        added == 2
+                        and row["belt"] == previous.get("belt") == 1
+                        and row["speed"] == previous.get("speed")
+                        and 0 < mono_span.total_seconds() * row["speed"] / 60 < 0.25
+                    ),
                 )
 
         pushed = row["n_push"] - previous["n_push"]
@@ -357,11 +364,7 @@ def main() -> int:
         )
         used_a_codes.add(good.code)
 
-    # А: дребезг S1 дал два номера одному физическому месту. Камера записала код
-    # на следующий номер, а повтор того же чтения оставил предыдущий без вердикта.
-    repeat_by_code: dict[str, list[tuple[datetime, datetime, str, int]]] = defaultdict(list)
-    for repeat in repeats:
-        repeat_by_code[repeat[2]].append(repeat)
+    # А: два номера на участке короче минимального расстояния между тубами.
     for number, tube in sorted(tubes.items()):
         following = tubes.get(number + 1)
         if (
@@ -370,6 +373,7 @@ def main() -> int:
             or tube.s1_mono is None
             or following is None
             or following.input_group != tube.input_group
+            or not tube.duplicate_input
         ):
             continue
         next_good = next(
@@ -381,12 +385,6 @@ def main() -> int:
             None,
         )
         if next_good is None or next_good.code in used_a_codes:
-            continue
-        nearby_repeat = any(
-            0 <= (repeat[1] - next_good.mono).total_seconds() <= 0.75
-            for repeat in repeat_by_code.get(next_good.code, [])
-        )
-        if not nearby_repeat:
             continue
         target_box = next(
             (b for b in code_boxes[next_good.code] if b.kind != "ручной"), None
@@ -531,11 +529,7 @@ def main() -> int:
             continue
         ordered = sorted(unique.values(), key=lambda box: box_order[box.sscc])
         event = next(iter(good_by_code.get(code, [])), None)
-        if event is None:
-            continue
-        tube = tubes.get(event.number)
-        if tube is None or tube.s1_raw is None or tube.s1_mono is None:
-            continue
+        tube = tubes.get(event.number) if event else None
         reason = (
             "ручной скан не проверил глобальный дубль"
             if any(box.kind == "ручной" for box in ordered)
@@ -543,14 +537,16 @@ def main() -> int:
         )
         add_row(
             "Г",
-            show_time(tube.s1_raw),
-            str(event.number),
+            show_time(tube.s1_raw) if tube and tube.s1_raw else "",
+            str(event.number) if event else "",
             code,
             " ".join(box.sscc for box in ordered),
             reason,
-            tube.s1_mono,
+            tube.s1_mono if tube and tube.s1_mono else ordered[0].mono,
         )
 
+    duplicated_codes = {row["код"] for row in rows if row["вид"] == "Г"}
+    rows = [row for row in rows if row["вид"] != "А" or row["код"] not in duplicated_codes]
     rows.sort(key=lambda row: (row["_sort"], row["вид"], row["туба"]))
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", newline="")

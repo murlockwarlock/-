@@ -1,5 +1,6 @@
 import csv
 import io
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -55,6 +56,71 @@ class EvidenceTests(unittest.TestCase):
             "BOX;2026-10-21 21:02:02.000;авто;1;CODE1\n",
         )
         self.assertEqual(rows, [])
+
+
+    def test_manual_duplicate_without_camera_history(self):
+        rows = self.run_shift(
+            "2026-10-21 21:00:00.000;0;0;0;0;0;18\n",
+            "",
+            "B1;2026-10-21 21:01:00.000;ручной;1;CODE\n"
+            "B2;2026-10-21 21:02:00.000;ручной;1;CODE\n",
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["вид"], rows[0]["код"], rows[0]["короб"]),
+                         ("Г", "CODE", "B1 B2"))
+        self.assertEqual((rows[0]["время"], rows[0]["туба"]), ("", ""))
+
+    def test_duplicate_assignment_is_not_also_missing(self):
+        rows = self.run_shift(
+            "2026-10-21 21:00:00.000;0;0;0;0;1;18\n"
+            "2026-10-21 21:00:01.000;1;0;0;0;1;18\n"
+            "2026-10-21 21:00:03.000;1;1;1;0;1;18\n",
+            "2026-10-21 21:00:01.050 №1 годен CODE\n",
+            "B1;2026-10-21 21:01:00.000;авто;1;CODE\n"
+            "B2;2026-10-21 21:02:00.000;ручной;1;CODE\n",
+        )
+        self.assertEqual([r["вид"] for r in rows], ["Г"])
+
+    def test_sensor_bounce_uses_spacing_not_repeated_camera_message(self):
+        for speed, expected in [(18, ["А"]), (60, [])]:
+            with self.subTest(speed=speed):
+                rows = self.run_shift(
+                    f"2026-10-21 21:00:00.000;0;0;0;0;1;{speed}\n"
+                    f"2026-10-21 21:00:00.300;2;0;0;0;1;{speed}\n"
+                    f"2026-10-21 21:00:03.000;2;1;1;0;1;{speed}\n",
+                    "2026-10-21 21:00:00.350 №2 годен CODE\n",
+                    "BOX;2026-10-21 21:00:04.000;авто;1;CODE\n",
+                )
+                self.assertEqual([r["вид"] for r in rows], expected)
+                if rows:
+                    self.assertEqual(rows[0]["туба"], "1")
+
+    def test_clock_epoch_does_not_depend_on_last_poll_time(self):
+        from datetime import datetime
+        spec = importlib.util.spec_from_file_location("detector_clock_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        first, second = module.MonotonicClock(), module.MonotonicClock()
+        first.convert(datetime(2026, 10, 21, 23, 31, 0, 100000))
+        second.convert(datetime(2026, 10, 21, 23, 31, 0, 900000))
+        after = datetime(2026, 10, 21, 23, 30, 1)
+        self.assertEqual(first.convert(after), second.convert(after))
+
+    def test_extra_tube_is_found_after_clock_rollback(self):
+        rows = self.run_shift(
+            "2026-10-21 23:30:59.000;0;0;0;0;1;26\n"
+            "2026-10-21 23:31:00.900;2;0;0;0;1;26\n"
+            "2026-10-21 23:30:00.050;2;0;0;0;1;26\n"
+            "2026-10-21 23:30:03.000;2;0;0;1;1;26\n"
+            "2026-10-21 23:30:03.500;2;0;0;2;1;26\n",
+            "2026-10-21 23:31:00.000 №1 годен CODE\n"
+            "2026-10-21 23:31:00.100 №2 брак NoRead\n"
+            "2026-10-21 23:30:00.500 повтор CODE\n"
+            "2026-10-21 23:30:03.600 Этикетка 123, дата 21.10.2026\n",
+            "123;2026-10-21 23:30:03.600;авто;1;CODE\n",
+        )
+        self.assertEqual([(r["вид"], r["туба"]) for r in rows], [("Б", "2")])
 
 
 if __name__ == "__main__":

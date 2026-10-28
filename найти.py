@@ -150,12 +150,11 @@ def read_plc(folder: Path):
 
         pushed = row["n_push"] - previous["n_push"]
         if pushed > 0:
-            first = row["push_no"] - pushed + 1
-            for number in range(first, row["push_no"] + 1):
-                tube = tubes.setdefault(number, Tube(number))
-                tube.pushed = True
-                tube.push_raw = row["raw"]
-                tube.push_mono = row["mono"]
+            number = row["push_no"]
+            tube = tubes.setdefault(number, Tube(number))
+            tube.pushed = True
+            tube.push_raw = row["raw"]
+            tube.push_mono = row["mono"]
 
         passed = row["n_out"] - previous["n_out"]
         if passed > 0:
@@ -468,62 +467,6 @@ def main() -> int:
             "код возвращён в очередь после потерянного MarkEnd",
             first_tube.s1_mono,
         )
-
-    # А за S2: длительный подтверждённый затор (многократное чтение одной тубы
-    # на остановленной ленте). Первая туба, дошедшая до стола после пуска, —
-    # консервативный кандидат на снятую укладчиком тубу.
-    passed_numbers = [n for n in sorted(tubes) if not tubes[n].pushed]
-    starts_mono = [item[1] for item in starts]
-    for _stop_raw, stop_mono in stops:
-        start_index = bisect.bisect_right(starts_mono, stop_mono)
-        if start_index >= len(starts):
-            continue
-        _start_raw, start_mono = starts[start_index]
-        if (start_mono - stop_mono).total_seconds() < 60:
-            continue
-        during = Counter(
-            code for _raw, mono, code, _line in repeats if stop_mono <= mono <= start_mono
-        )
-        if not during or max(during.values()) < 3:
-            continue
-        first_out = next((item for item in out_changes if item[0] >= start_mono), None)
-        if first_out is None or (first_out[0] - start_mono).total_seconds() > 30:
-            continue
-        count = first_out[1]
-        if not 1 <= count <= len(passed_numbers):
-            continue
-        number = passed_numbers[count - 1]
-        tube = tubes.get(number)
-        good = next(
-            (
-                e
-                for e in events_by_number.get(number, [])
-                if e.verdict == "годен" and e.code in code_boxes
-            ),
-            None,
-        )
-        if (
-            tube is None
-            or tube.s1_raw is None
-            or tube.s1_mono is None
-            or good is None
-            or good.code in used_a_codes
-        ):
-            continue
-        target_box = next((b for b in code_boxes[good.code] if b.kind != "ручной"), None)
-        if target_box is None:
-            continue
-        add_row(
-            "А",
-            show_time(tube.s1_raw),
-            str(number),
-            good.code,
-            target_box.sscc,
-            "тубу сняли на столе после длительного затора",
-            tube.s1_mono,
-            pre_s2=False,
-        )
-        used_a_codes.add(good.code)
 
     # Б: сравниваем накопительный n_out с записанными кодами. Учтены уже
     # доказанные А до S2. Случай выдаётся лишь когда нижняя граница n_out уже
